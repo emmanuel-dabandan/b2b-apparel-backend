@@ -11,7 +11,7 @@ app = FastAPI()
 origins = [
     "http://localhost:5173",               # Keeps your local testing working
     "http://127.0.0.1:5173",               
-    "https://YOUR-VERCEL-URL.vercel.app"   # <--- PASTE YOUR ACTUAL VERCEL URL HERE!
+    "https://b2b-apparel-frontend.vercel.app"   # <--- PASTE YOUR ACTUAL VERCEL URL HERE!
 ]
 
 app.add_middleware(
