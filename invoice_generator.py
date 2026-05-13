@@ -131,7 +131,7 @@ def _items_table(pdf: FPDF, data: InvoiceData):
         pdf.set_text_color(*INK)
         pdf.set_x(12)
 
-        name = item.name if len(item.name) <= 54 else item.name[:51] + "…"
+        name = item.name if len(item.name) <= 54 else item.name[:51] + "..."
         pdf.cell(col[0], 8, f"  {name}", fill=True)
         pdf.cell(col[1], 8, str(item.quantity),              fill=True, align="C")
         pdf.cell(col[2], 8, f"${item.price:.2f}",            fill=True, align="C")
@@ -163,7 +163,7 @@ def _totals_block(pdf: FPDF, data: InvoiceData):
     trow("Subtotal:", data.subtotal)
     trow("Tax (6.5%):", data.tax_amount)
 
-    shipping_labels = {0: "Shipping (Standard – Free):", 30: "Shipping (Express):", 90: "Shipping (Same Day):"}
+    shipping_labels = {0: "Shipping (Standard - Free):", 30: "Shipping (Express):", 90: "Shipping (Same Day):"}
     trow(shipping_labels.get(int(data.shipping_cost), "Shipping:"), data.shipping_cost)
 
     pdf.ln(2)
@@ -213,8 +213,7 @@ def _footer(pdf: FPDF):
     pdf.set_text_color(*MUTED)
     pdf.cell(
         0, 5,
-        "Thank you for your business!  ·  B2B Apparel  ·  support@b2bapparel.com"
-        "  ·  This is a system-generated invoice.",
+        "Thank you for your business!  |  B2B Apparel  |  support@b2bapparel.com  |  This is a system-generated invoice.",
         align="C",
     )
 
