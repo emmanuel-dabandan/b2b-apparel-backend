@@ -17,7 +17,8 @@ from email.mime.text import MIMEText
 SMTP_USER: str = os.getenv("SMTP_USER", "")
 SMTP_PASS: str = os.getenv("SMTP_PASS", "")
 SMTP_HOST: str = "smtp.gmail.com"
-SMTP_PORT: int = 587
+# Changed to 465 for implicit SSL to bypass cloud egress firewalls
+SMTP_PORT: int = 465
 
 
 # ── HTML email template ───────────────────────────────────────────────────────
@@ -44,7 +45,7 @@ def _build_html(
         partial_notice = f"""
         <div style="background:#fff8e1;border-left:4px solid #f59e0b;
                     border-radius:6px;padding:14px 18px;margin:20px 0;">
-          <strong style="color:#92400e;">⚠ Partial Payment Recorded</strong><br>
+          <strong style="color:#92400e;">⚠️ Partial Payment Recorded</strong><br>
           <span style="font-size:13px;color:#78350f;">
             A balance of <strong>${balance_due:.2f}</strong> remains on this order.
             It has been added to your account ledger and will be due before shipment.
@@ -62,12 +63,10 @@ def _build_html(
          style="background:#e7ecef;padding:36px 0;">
     <tr><td align="center">
 
-      <!-- Card -->
       <table width="600" cellpadding="0" cellspacing="0"
              style="background:#ffffff;border-radius:14px;
                     overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.09);">
 
-        <!-- Header -->
         <tr>
           <td style="background:#274c77;padding:32px 44px;text-align:center;">
             <h1 style="color:#ffffff;margin:0;font-size:26px;
@@ -78,7 +77,6 @@ def _build_html(
           </td>
         </tr>
 
-        <!-- Body -->
         <tr>
           <td style="padding:40px 44px;">
 
@@ -90,7 +88,6 @@ def _build_html(
               successfully placed and is now being processed.
             </p>
 
-            <!-- Summary box -->
             <table width="100%" cellpadding="0" cellspacing="0"
                    style="background:#f0f4f8;border-radius:10px;
                           padding:20px 24px;margin-bottom:20px;">
@@ -134,7 +131,6 @@ def _build_html(
           </td>
         </tr>
 
-        <!-- Footer -->
         <tr>
           <td style="background:#274c77;padding:18px 44px;text-align:center;">
             <p style="color:#b8cce0;font-size:11px;margin:0;">
@@ -203,7 +199,7 @@ def send_order_confirmation(
     )
     msg.attach(MIMEText(html_body, "html"))
 
-    # ── Attach the PDF ─────────────────────────────────────────────
+    # ── Attach the PDF ────────────────────────────────────────────────────────
     with open(pdf_path, "rb") as fh:
         part = MIMEBase("application", "octet-stream")
         part.set_payload(fh.read())
@@ -214,9 +210,8 @@ def send_order_confirmation(
         )
         msg.attach(part)
 
-    # ── Send ───────────────────────────────────────────────────────
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.ehlo()
-        server.starttls()
+    # ── Send ──────────────────────────────────────────────────────────────────
+    # Switched to SMTP_SSL to ensure Render routes the traffic correctly
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
         server.login(SMTP_USER, SMTP_PASS)
         server.send_message(msg)
