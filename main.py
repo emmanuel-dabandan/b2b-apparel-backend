@@ -1,15 +1,14 @@
 import os
 import threading 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+import json
+import urllib.request
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.orm import Session
 
 import database
-from invoice_generator import generate_invoice_pdf, InvoiceData, InvoiceItem
-from email_service import send_order_confirmation
-
 
 app = FastAPI()
 
@@ -56,7 +55,7 @@ def get_db():
         db.close()
 
 
-# ── Pydantic models ────────────────────────────────────────────────────────────
+# ── Pydantic models ───────────────────────────────────────────────────────────
 
 class CartItem(BaseModel):
     id: str
@@ -69,17 +68,9 @@ class CheckoutPayload(BaseModel):
     items:              List[CartItem]
     payment_method:     str            # "full" | "down_payment"
 
-    # ── Fields added to fix existing bugs ──────────────────────────
-    # BUG FIX 1: customer_email was already sent by the frontend but
-    #            was silently ignored — the Order was never linked to a user.
+    # ── Fields added to fix existing bugs ──────────────────────────────────────
     customer_email:     Optional[str]  = None
-
-    # BUG FIX 2: frontend sends actual payment percentage (20/30/50/100)
-    #            but backend always defaulted to 50 % for any down_payment.
     payment_percentage: Optional[int]  = 100   # e.g. 100 / 50 / 30 / 20
-
-    # Needed for correct invoice totals (tax + shipping are applied here,
-    # not just on the frontend).
     shipping_method:    Optional[str]  = "standard"  # standard | express | sameday
     customer_name:      Optional[str]  = "Valued Customer"
 
@@ -100,72 +91,30 @@ class LoginPayload(BaseModel):
     password: str
 
 
-# ── Shipping cost lookup ────────────────────────────────────────────────────────
+# ── Shipping cost lookup ──────────────────────────────────────────────────────
 SHIPPING_COSTS = {"standard": 0.0, "express": 30.0, "sameday": 90.0}
 TAX_RATE = 0.065
 
 
-# ── Background task ────────────────────────────────────────────────────────────
-def _send_invoice_email(
-    order_id:       int,
-    customer_name:  str,
-    customer_email: str,
-    items:          List[CartItem],
-    subtotal:       float,
-    tax_amount:     float,
-    shipping_cost:  float,
-    total_due:      float,
-    amount_paid:    float,
-    balance_due:    float,
-    payment_status: str,
-):
+# ── Background task for Make.com ──────────────────────────────────────────────
+def _trigger_make_webhook(payload_dict: dict):
     """
-    Generates the invoice PDF and sends the confirmation email.
-    Runs as a FastAPI BackgroundTask so it never blocks the HTTP response.
-    Any exception is caught and logged — it does NOT crash the server.
+    Sends the checkout data to Make.com so it can generate the Google Doc
+    invoice and email the customer.
     """
+    url = "https://hook.eu1.make.com/rkzx9r8youzm9t7gwwxkhxtr7i5iocma"
+    req = urllib.request.Request(url, method="POST")
+    req.add_header('Content-Type', 'application/json')
+    data = json.dumps(payload_dict).encode('utf-8')
+    
     try:
-        invoice_data = InvoiceData(
-            order_id=order_id,
-            customer_name=customer_name,
-            customer_email=customer_email,
-            items=[
-                InvoiceItem(name=i.name, quantity=i.quantity, price=i.basePrice)
-                for i in items
-            ],
-            subtotal=subtotal,
-            tax_amount=tax_amount,
-            shipping_cost=shipping_cost,
-            total_due=total_due,
-            amount_paid=amount_paid,
-            balance_due=balance_due,
-            payment_status=payment_status,
-        )
-
-        pdf_path = generate_invoice_pdf(invoice_data)
-
-        send_order_confirmation(
-            to_email=customer_email,
-            customer_name=customer_name,
-            order_id=order_id,
-            amount_paid=amount_paid,
-            balance_due=balance_due,
-            is_fully_paid=(balance_due == 0),
-            pdf_path=pdf_path,
-        )
-
-        # Clean up the temp PDF after sending
-        if os.path.exists(pdf_path):
-            os.remove(pdf_path)
-
-        print(f"[EMAIL] Invoice sent to {customer_email} for order #{order_id}")
-
+        urllib.request.urlopen(req, data=data)
+        print(f"[WEBHOOK] Successfully triggered Make.com for Order #{payload_dict.get('orderId')}")
     except Exception as exc:
-        # Log the error but do not let it surface to the customer
-        print(f"[EMAIL ERROR] Failed to send invoice for order #{order_id}: {exc}")
+        print(f"[WEBHOOK ERROR] Failed to trigger Make.com: {exc}")
 
 
-# ── Product endpoints (unchanged) ──────────────────────────────────────────────
+# ── Product endpoints ─────────────────────────────────────────────────────────
 
 @app.get("/api/products")
 def get_all_products(db: Session = Depends(get_db)):
@@ -225,37 +174,36 @@ def update_product(product_id: int, product: ProductCreate, db: Session = Depend
     }
 
 
-# ── Checkout endpoint ──────────────────────────────────────────────────────────
+# ── Checkout endpoint ─────────────────────────────────────────────────────────
 
 @app.post("/api/checkout")
 async def process_checkout(
     payload: CheckoutPayload,
     db:      Session = Depends(get_db),
 ):
-    # ── 1. Validate MOQ ────────────────────────────────────────────
+    # ── 1. Validate MOQ ──
     total_quantity = sum(item.quantity for item in payload.items)
     if total_quantity < 20:
         raise HTTPException(status_code=400, detail="Minimum order of 20 items required.")
 
-    # ── 2. Subtotal with bulk discount ─────────────────────────────
+    # ── 2. Subtotal with bulk discount ──
     discount = 0.8 if total_quantity >= 100 else 0.9 if total_quantity >= 50 else 1.0
     subtotal = sum(item.basePrice * item.quantity * discount for item in payload.items)
 
-    # ── 3. Tax + shipping (now calculated server-side too) ─────────
+    # ── 3. Tax + shipping ──
     tax_amount    = round(subtotal * TAX_RATE, 2)
     shipping_cost = SHIPPING_COSTS.get(payload.shipping_method or "standard", 0.0)
     total_due     = round(subtotal + tax_amount + shipping_cost, 2)
 
-    # ── 4. Payment split using the actual percentage the user chose ─
-    # BUG FIX: was always 50 % regardless of what the customer selected
+    # ── 4. Payment split ──
     pct          = (payload.payment_percentage or 100) / 100
     amount_paid  = round(total_due * pct, 2)
     balance_due  = round(total_due - amount_paid, 2)
     status       = "Paid in Full" if balance_due == 0 else "Partial Payment"
 
-    # ── 5. Persist order ───────────────────────────────────────────
+    # ── 5. Persist order ──
     new_order = database.Order(
-        customer_email=payload.customer_email,   # requires column added in database.py (see note)
+        customer_email=payload.customer_email,
         total_items=total_quantity,
         final_total=total_due,
         amount_paid=amount_paid,
@@ -275,32 +223,39 @@ async def process_checkout(
         ))
     db.commit()
 
-    # ── 6. Fire email + invoice ──
+    # ── 6. Fire Make.com Webhook ──
     if payload.customer_email:
-        # Using a thread instead — BackgroundTasks gets killed on Render's
-        # free tier before the email finishes sending.
+        webhook_payload = {
+            "orderId": new_order.id,
+            "customerName": payload.customer_name or "Valued Customer",
+            "email": payload.customer_email,
+            "shipping_method": payload.shipping_method or "standard",
+            "subtotal": subtotal,
+            "tax_amount": tax_amount,
+            "shipping_cost": shipping_cost,
+            "totalDue": total_due,
+            "amountPaid": amount_paid,
+            "balance": balance_due,
+            "payment_status": status,
+            "items": [
+                {
+                    "name": i.name,
+                    "quantity": i.quantity,
+                    "price": i.basePrice
+                } for i in payload.items
+            ]
+        }
+        
         thread = threading.Thread(
-            target=_send_invoice_email,
-            kwargs=dict(
-                order_id=new_order.id,
-                customer_name=payload.customer_name or "Valued Customer",
-                customer_email=payload.customer_email,
-                items=payload.items,
-                subtotal=subtotal,
-                tax_amount=tax_amount,
-                shipping_cost=shipping_cost,
-                total_due=total_due,
-                amount_paid=amount_paid,
-                balance_due=balance_due,
-                payment_status=status,
-            )
+            target=_trigger_make_webhook,
+            args=(webhook_payload,)
         )
         thread.start()
 
     return {
         "status": "success",
         "order_summary": {
-            "id":             new_order.id,         # NOTE: key changed from order_id → id
+            "id":             new_order.id,         
             "total_items":    new_order.total_items,
             "final_total":    round(new_order.final_total, 2),
             "amount_paid":    round(new_order.amount_paid, 2),
@@ -310,7 +265,7 @@ async def process_checkout(
     }
 
 
-# ── Orders endpoint (BUG FIX: now returns customer_email) ─────────────────────
+# ── Orders endpoint ───────────────────────────────────────────────────────────
 
 @app.get("/api/orders")
 def get_all_orders(db: Session = Depends(get_db)):
@@ -323,7 +278,7 @@ def get_all_orders(db: Session = Depends(get_db)):
         ]
         result.append({
             "id":             order.id,
-            "customer_email": order.customer_email,   # BUG FIX: was missing — broke "My Orders" filter in App.jsx
+            "customer_email": order.customer_email,
             "total_items":    order.total_items,
             "final_total":    order.final_total,
             "amount_paid":    order.amount_paid,
@@ -334,7 +289,7 @@ def get_all_orders(db: Session = Depends(get_db)):
     return result
 
 
-# ── Auth endpoints (unchanged) ─────────────────────────────────────────────────
+# ── Auth endpoints ────────────────────────────────────────────────────────────
 
 @app.post("/api/login")
 def login_user(payload: LoginPayload):
