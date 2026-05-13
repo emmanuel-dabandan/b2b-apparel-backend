@@ -1,4 +1,5 @@
 import os
+import threading 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -229,9 +230,8 @@ def update_product(product_id: int, product: ProductCreate, db: Session = Depend
 
 @app.post("/api/checkout")
 async def process_checkout(
-    payload:          CheckoutPayload,
-    background_tasks: BackgroundTasks,
-    db:               Session = Depends(get_db),
+    payload: CheckoutPayload,
+    db:      Session = Depends(get_db),
 ):
     # ── 1. Validate MOQ ────────────────────────────────────────────
     total_quantity = sum(item.quantity for item in payload.items)
@@ -277,21 +277,28 @@ async def process_checkout(
     db.commit()
 
     # ── 6. Fire email + invoice in the background ──────────────────
-    if payload.customer_email:
-        background_tasks.add_task(
-            _send_invoice_email,
-            order_id=new_order.id,
-            customer_name=payload.customer_name or "Valued Customer",
-            customer_email=payload.customer_email,
-            items=payload.items,
-            subtotal=subtotal,
-            tax_amount=tax_amount,
-            shipping_cost=shipping_cost,
-            total_due=total_due,
-            amount_paid=amount_paid,
-            balance_due=balance_due,
-            payment_status=status,
-        )
+    # ── 6. Fire email + invoice ──────────────────────────────────
+        if payload.customer_email:
+            # REMOVED: background_tasks.add_task(...)
+            # Using a thread instead — BackgroundTasks gets killed on Render's
+            # free tier before the email finishes sending.
+            thread = threading.Thread(
+                target=_send_invoice_email,
+                kwargs=dict(
+                    order_id=new_order.id,
+                    customer_name=payload.customer_name or "Valued Customer",
+                    customer_email=payload.customer_email,
+                    items=payload.items,
+                    subtotal=subtotal,
+                    tax_amount=tax_amount,
+                    shipping_cost=shipping_cost,
+                    total_due=total_due,
+                    amount_paid=amount_paid,
+                    balance_due=balance_due,
+                    payment_status=status,
+                )
+            )
+            thread.start()
 
     return {
         "status": "success",
