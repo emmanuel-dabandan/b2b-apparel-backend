@@ -20,6 +20,7 @@ class Order(Base):
     balance_due = Column(Float)
     payment_status = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+    customer_email = Column(String, nullable=True)
     
     # --- NEW: Relationship linking to the items ---
     items = relationship("OrderItem", back_populates="order")
