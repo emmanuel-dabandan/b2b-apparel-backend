@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 import database
 from invoice_generator import generate_invoice_pdf, InvoiceData, InvoiceItem
 from email_service import send_order_confirmation
+from invoice_generator import generate_invoice_pdf, InvoiceData, InvoiceItem
+from email_service import send_order_confirmation
 
 app = FastAPI()
 
