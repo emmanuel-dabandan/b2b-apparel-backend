@@ -24,6 +24,10 @@ class Order(Base):
     
     # --- NEW: Relationship linking to the items ---
     items = relationship("OrderItem", back_populates="order")
+    # Inside your Order model class:
+    customer_phone = Column(String, nullable=True)
+    shipping_address = Column(String, nullable=True)
+    customer_name = Column(String, nullable=True)
 
 # --- NEW: The Line-Item Table ---
 class OrderItem(Base):

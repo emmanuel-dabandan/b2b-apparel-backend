@@ -68,11 +68,14 @@ class CheckoutPayload(BaseModel):
     items:              List[CartItem]
     payment_method:     str            # "full" | "down_payment"
 
-    # ── Fields added to fix existing bugs ──────────────────────────────────────
     customer_email:     Optional[str]  = None
-    payment_percentage: Optional[int]  = 100   # e.g. 100 / 50 / 30 / 20
-    shipping_method:    Optional[str]  = "standard"  # standard | express | sameday
+    payment_percentage: Optional[int]  = 100   
+    shipping_method:    Optional[str]  = "standard"  
     customer_name:      Optional[str]  = "Valued Customer"
+    
+    # ── Add these two new lines ──
+    customer_phone:     Optional[str]  = None
+    shipping_address:   Optional[str]  = None
 
 
 class ProductCreate(BaseModel):
@@ -202,8 +205,15 @@ async def process_checkout(
     status       = "Paid in Full" if balance_due == 0 else "Partial Payment"
 
     # ── 5. Persist order ──
+    # ── 5. Persist order ──
     new_order = database.Order(
         customer_email=payload.customer_email,
+        
+        # ── Add these three lines so the DB saves them! ──
+        customer_name=payload.customer_name,
+        customer_phone=payload.customer_phone,
+        shipping_address=payload.shipping_address,
+        
         total_items=total_quantity,
         final_total=total_due,
         amount_paid=amount_paid,
@@ -279,6 +289,12 @@ def get_all_orders(db: Session = Depends(get_db)):
         result.append({
             "id":             order.id,
             "customer_email": order.customer_email,
+            
+            # ── Add these three lines so React receives them! ──
+            "customer_name":    order.customer_name,
+            "customer_phone":   order.customer_phone,
+            "shipping_address": order.shipping_address,
+            
             "total_items":    order.total_items,
             "final_total":    order.final_total,
             "amount_paid":    order.amount_paid,
