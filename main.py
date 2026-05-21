@@ -184,36 +184,40 @@ async def process_checkout(
     payload: CheckoutPayload,
     db:      Session = Depends(get_db),
 ):
-    # ── 1. Validate MOQ ──
+    # --- 1. Validate MOQ ---
     total_quantity = sum(item.quantity for item in payload.items)
     if total_quantity < 20:
         raise HTTPException(status_code=400, detail="Minimum order of 20 items required.")
 
-    # ── 2. Subtotal with bulk discount ──
+    # --- 2. Validate Stock for all items BEFORE committing anything ---
+    for item in payload.items:
+        db_product = db.query(database.Product).filter(database.Product.id == item.id).first()
+        if not db_product:
+            raise HTTPException(status_code=404, detail=f"Product {item.name} not found.")
+        if db_product.stock < item.quantity:
+            raise HTTPException(status_code=400, detail=f"Insufficient stock for {item.name}")
+
+    # --- 3. Subtotal with bulk discount ---
     discount = 0.8 if total_quantity >= 100 else 0.9 if total_quantity >= 50 else 1.0
     subtotal = sum(item.basePrice * item.quantity * discount for item in payload.items)
 
-    # ── 3. Tax + shipping ──
+    # --- 4. Tax + shipping ---
     tax_amount    = round(subtotal * TAX_RATE, 2)
     shipping_cost = SHIPPING_COSTS.get(payload.shipping_method or "standard", 0.0)
     total_due     = round(subtotal + tax_amount + shipping_cost, 2)
 
-    # ── 4. Payment split ──
+    # --- 5. Payment split ---
     pct          = (payload.payment_percentage or 100) / 100
     amount_paid  = round(total_due * pct, 2)
     balance_due  = round(total_due - amount_paid, 2)
     status       = "Paid in Full" if balance_due == 0 else "Partial Payment"
 
-    # ── 5. Persist order ──
-    # ── 5. Persist order ──
+    # --- 6. Persist Order and Decrement Stock ---
     new_order = database.Order(
         customer_email=payload.customer_email,
-        
-        # ── Add these three lines so the DB saves them! ──
         customer_name=payload.customer_name,
         customer_phone=payload.customer_phone,
         shipping_address=payload.shipping_address,
-        
         total_items=total_quantity,
         final_total=total_due,
         amount_paid=amount_paid,
@@ -221,19 +225,25 @@ async def process_checkout(
         payment_status=status,
     )
     db.add(new_order)
-    db.commit()
+    db.commit() # Commit to generate new_order.id
     db.refresh(new_order)
 
     for item in payload.items:
+        # Decrement Stock
+        db_product = db.query(database.Product).filter(database.Product.id == item.id).first()
+        db_product.stock -= item.quantity
+        
+        # Add Order Item
         db.add(database.OrderItem(
             order_id=new_order.id,
             product_name=item.name,
             quantity=item.quantity,
             price_at_purchase=item.basePrice,
         ))
-    db.commit()
+    
+    db.commit() # Save stock updates and order items
 
-    # ── 6. Fire Make.com Webhook ──
+    # --- 7. Fire Make.com Webhook ---
     if payload.customer_email:
         webhook_payload = {
             "orderId": new_order.id,
@@ -248,32 +258,44 @@ async def process_checkout(
             "balance": balance_due,
             "payment_status": status,
             "items": [
-                {
-                    "name": i.name,
-                    "quantity": i.quantity,
-                    "price": i.basePrice
-                } for i in payload.items
+                {"name": i.name, "quantity": i.quantity, "price": i.basePrice} 
+                for i in payload.items
             ]
         }
         
-        thread = threading.Thread(
-            target=_trigger_make_webhook,
-            args=(webhook_payload,)
-        )
+        thread = threading.Thread(target=_trigger_make_webhook, args=(webhook_payload,))
         thread.start()
 
     return {
         "status": "success",
         "order_summary": {
-            "id":             new_order.id,         
-            "total_items":    new_order.total_items,
-            "final_total":    round(new_order.final_total, 2),
-            "amount_paid":    round(new_order.amount_paid, 2),
-            "balance_due":    round(new_order.balance_due, 2),
+            "id": new_order.id,         
+            "total_items": new_order.total_items,
+            "final_total": round(new_order.final_total, 2),
+            "amount_paid": round(new_order.amount_paid, 2),
+            "balance_due": round(new_order.balance_due, 2),
             "payment_status": new_order.payment_status,
         },
     }
 
+@app.post("/api/products/{product_id}/decrement")
+def decrement_stock(product_id: int, payload: dict, db: Session = Depends(get_db)):
+    # 1. Find the product
+    db_product = db.query(database.Product).filter(database.Product.id == product_id).first()
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    # 2. Check stock
+    quantity_to_subtract = payload.get("quantity", 0)
+    if db_product.stock < quantity_to_subtract:
+        raise HTTPException(status_code=400, detail=f"Not enough stock for {db_product.name}")
+    
+    # 3. Update stock
+    db_product.stock -= quantity_to_subtract
+    db.commit()
+    db.refresh(db_product)
+    
+    return {"status": "success", "new_stock": db_product.stock}
 
 # ── Orders endpoint ───────────────────────────────────────────────────────────
 
