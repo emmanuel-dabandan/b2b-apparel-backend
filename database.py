@@ -51,3 +51,11 @@ class Product(Base):
     stock = Column(Integer)
     sizes = Column(String)
     colors = Column(String)
+
+class User(Base):
+    __tablename__ = "profiles" # Mapping to your Supabase profiles table
+    
+    id = Column(String, primary_key=True, index=True) # UUID from Supabase
+    email = Column(String, unique=True, index=True)
+    role = Column(String, default="customer") # "admin" or "customer"
+    created_at = Column(DateTime, default=datetime.utcnow)

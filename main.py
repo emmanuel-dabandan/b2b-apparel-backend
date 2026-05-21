@@ -2,11 +2,16 @@ import os
 import threading 
 import json
 import urllib.request
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.orm import Session
+from supabase import create_client
+
+# Use your SERVICE_ROLE_KEY from Supabase (keep this safe!)
+supabaseUrl = os.environ.get("VITE_SUPABASE_URL")
+supabase_admin = create_client(supabaseUrl, os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
 
 import database
 
@@ -14,14 +19,28 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://b2b-apparel-frontend.vercel.app",
+        "http://localhost:5173"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 database.Base.metadata.create_all(bind=database.engine)
 
+# --- SECURITY DEPENDENCY ---
+def get_current_user(token: str = Header(...), db: Session = Depends(database.SessionLocal)):
+    try:
+        user_response = supabase_admin.auth.get_user(token)
+        user_id = user_response.user.id
+        profile = db.query(database.User).filter(database.User.id == user_id).first()
+        if not profile or profile.role != 'admin':
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return profile
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Could not validate credentials")
 
 @app.on_event("startup")
 def seed_inventory():
@@ -55,7 +74,7 @@ def get_db():
         db.close()
 
 
-# ── Pydantic models ───────────────────────────────────────────────────────────
+# â”€â”€ Pydantic models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class CartItem(BaseModel):
     id: str
@@ -73,7 +92,7 @@ class CheckoutPayload(BaseModel):
     shipping_method:    Optional[str]  = "standard"  
     customer_name:      Optional[str]  = "Valued Customer"
     
-    # ── Add these two new lines ──
+    # â”€â”€ Add these two new lines â”€â”€
     customer_phone:     Optional[str]  = None
     shipping_address:   Optional[str]  = None
 
@@ -94,12 +113,12 @@ class LoginPayload(BaseModel):
     password: str
 
 
-# ── Shipping cost lookup ──────────────────────────────────────────────────────
+# â”€â”€ Shipping cost lookup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 SHIPPING_COSTS = {"standard": 0.0, "express": 30.0, "sameday": 90.0}
 TAX_RATE = 0.065
 
 
-# ── Background task for Make.com ──────────────────────────────────────────────
+# â”€â”€ Background task for Make.com â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 def _trigger_make_webhook(payload_dict: dict):
     """
     Sends the checkout data to Make.com so it can generate the Google Doc
@@ -117,7 +136,7 @@ def _trigger_make_webhook(payload_dict: dict):
         print(f"[WEBHOOK ERROR] Failed to trigger Make.com: {exc}")
 
 
-# ── Product endpoints ─────────────────────────────────────────────────────────
+# â”€â”€ Product endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/products")
 def get_all_products(db: Session = Depends(get_db)):
@@ -177,7 +196,7 @@ def update_product(product_id: int, product: ProductCreate, db: Session = Depend
     }
 
 
-# ── Checkout endpoint ─────────────────────────────────────────────────────────
+# â”€â”€ Checkout endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/checkout")
 async def process_checkout(
@@ -191,11 +210,13 @@ async def process_checkout(
 
     # --- 2. Validate Stock for all items BEFORE committing anything ---
     for item in payload.items:
-        db_product = db.query(database.Product).filter(database.Product.id == item.id).first()
+        # Extract the base numeric ID.
+        base_product_id = item.id.split('-')[0]
+        db_product = db.query(database.Product).filter(database.Product.id == int(base_product_id)).first()
         if not db_product:
-            raise HTTPException(status_code=404, detail=f"Product {item.name} not found.")
+            raise HTTPException(status_code=404, detail=f"Product with ID {base_product_id} not found.")
         if db_product.stock < item.quantity:
-            raise HTTPException(status_code=400, detail=f"Insufficient stock for {item.name}")
+            raise HTTPException(status_code=400, detail=f"Insufficient stock for {db_product.name}")
 
     # --- 3. Subtotal with bulk discount ---
     discount = 0.8 if total_quantity >= 100 else 0.9 if total_quantity >= 50 else 1.0
@@ -230,7 +251,8 @@ async def process_checkout(
 
     for item in payload.items:
         # Decrement Stock
-        db_product = db.query(database.Product).filter(database.Product.id == item.id).first()
+        base_product_id = item.id.split('-')[0]
+        db_product = db.query(database.Product).filter(database.Product.id == int(base_product_id)).first()
         db_product.stock -= item.quantity
         
         # Add Order Item
@@ -297,7 +319,7 @@ def decrement_stock(product_id: int, payload: dict, db: Session = Depends(get_db
     
     return {"status": "success", "new_stock": db_product.stock}
 
-# ── Orders endpoint ───────────────────────────────────────────────────────────
+# â”€â”€ Orders endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/orders")
 def get_all_orders(db: Session = Depends(get_db)):
@@ -312,7 +334,7 @@ def get_all_orders(db: Session = Depends(get_db)):
             "id":             order.id,
             "customer_email": order.customer_email,
             
-            # ── Add these three lines so React receives them! ──
+            # â”€â”€ Add these three lines so React receives them! â”€â”€
             "customer_name":    order.customer_name,
             "customer_phone":   order.customer_phone,
             "shipping_address": order.shipping_address,
@@ -327,7 +349,7 @@ def get_all_orders(db: Session = Depends(get_db)):
     return result
 
 
-# ── Auth endpoints ────────────────────────────────────────────────────────────
+# â”€â”€ Auth endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/login")
 def login_user(payload: LoginPayload):
@@ -336,3 +358,13 @@ def login_user(payload: LoginPayload):
     elif payload.username == "customer" and payload.password == "customer123":
         return {"status": "success", "role": "customer"}
     raise HTTPException(status_code=401, detail="Invalid username or password")
+
+@app.get("/api/users")
+def get_all_users(db: Session = Depends(get_db), current_user: database.User = Depends(get_current_user)):
+    users = db.query(database.User).all()
+    return [{"id": u.id, "email": u.email, "role": u.role, "created_at": u.created_at} for u in users]
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: str, current_user: database.User = Depends(get_current_user)):
+    supabase_admin.auth.admin.delete_user(user_id)
+    return {"status": "success"}
