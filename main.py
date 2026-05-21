@@ -199,6 +199,7 @@ def update_product(product_id: int, product: ProductCreate, db: Session = Depend
 # â”€â”€ Checkout endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.post("/api/checkout")
+@app.post("/api/checkout")
 async def process_checkout(
     payload: CheckoutPayload,
     db:      Session = Depends(get_db),
@@ -208,11 +209,12 @@ async def process_checkout(
     if total_quantity < 20:
         raise HTTPException(status_code=400, detail="Minimum order of 20 items required.")
 
-    # --- 2. Validate Stock for all items BEFORE committing anything ---
+    # --- 2. Validate Stock for all items BEFORE committing ---
     for item in payload.items:
-        # Extract the base numeric ID.
+        # Extract the base numeric ID (e.g., '2-XXL-Navy' -> 2)
         base_product_id = item.id.split('-')[0]
         db_product = db.query(database.Product).filter(database.Product.id == int(base_product_id)).first()
+        
         if not db_product:
             raise HTTPException(status_code=404, detail=f"Product with ID {base_product_id} not found.")
         if db_product.stock < item.quantity:
@@ -250,9 +252,11 @@ async def process_checkout(
     db.refresh(new_order)
 
     for item in payload.items:
-        # Decrement Stock
+        # Parse numeric ID
         base_product_id = item.id.split('-')[0]
         db_product = db.query(database.Product).filter(database.Product.id == int(base_product_id)).first()
+        
+        # Decrement Stock
         db_product.stock -= item.quantity
         
         # Add Order Item
@@ -263,7 +267,7 @@ async def process_checkout(
             price_at_purchase=item.basePrice,
         ))
     
-    db.commit() # Save stock updates and order items
+    db.commit() # Save both order items and stock updates in one transaction
 
     # --- 7. Fire Make.com Webhook ---
     if payload.customer_email:
@@ -279,12 +283,8 @@ async def process_checkout(
             "amountPaid": amount_paid,
             "balance": balance_due,
             "payment_status": status,
-            "items": [
-                {"name": i.name, "quantity": i.quantity, "price": i.basePrice} 
-                for i in payload.items
-            ]
+            "items": [{"name": i.name, "quantity": i.quantity, "price": i.basePrice} for i in payload.items]
         }
-        
         thread = threading.Thread(target=_trigger_make_webhook, args=(webhook_payload,))
         thread.start()
 
